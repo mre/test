@@ -1,0 +1,5 @@
+some.metric 1.299534 1490732151
+
+another.metric 2.998927 1490732151
+
+some.metric 57655 1490732151
