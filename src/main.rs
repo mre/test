@@ -1,8 +1,6 @@
 // `error_chain!` can recurse deeply
 #![recursion_limit = "1024"]
 
-// Import the macro. Don't forget to add `error-chain` in your
-// `Cargo.toml`!
 #[macro_use]
 extern crate error_chain;
 
@@ -17,6 +15,7 @@ extern crate rdkafka;
 extern crate tokio_core;
 extern crate influxdb;
 
+use std::rc::Rc;
 use clap::{App, Arg};
 use futures::Future;
 use futures::stream::Stream;
@@ -52,11 +51,6 @@ struct Producer {
     db: AsyncDb,
 }
 
-
-
-
-
-
 fn handle(brokers: &str, group_id: &str, topic: &str) -> Result<()> {
     // Create the event loop. The event loop will run on a single thread and drive the pipeline.
     let mut core = Core::new()?;
@@ -73,9 +67,11 @@ fn handle(brokers: &str, group_id: &str, topic: &str) -> Result<()> {
         .set("enable.partition.eof", "false")
         .set("session.timeout.ms", "6000")
         .set("enable.auto.commit", "false")
-        .set_default_topic_config(TopicConfig::new()
-            .set("auto.offset.reset", "smallest")
-            .finalize())
+        .set_default_topic_config(
+            TopicConfig::new()
+                .set("auto.offset.reset", "smallest")
+                .finalize(),
+        )
         .create::<StreamConsumer<_>>()?;
 
     let mut topics = TopicPartitionList::new();
@@ -101,15 +97,19 @@ fn handle(brokers: &str, group_id: &str, topic: &str) -> Result<()> {
     // to the event loop.
     let handle = core.handle();
 
-    let async_db = AsyncDb::new(core.handle(),
-                                "http://influxdb:8086", // URL to InfluxDB
-                                "metrics" /* Name of the database in InfluxDB */)
-        .expect("Unable to create AsyncDb");
+    let async_db = Rc::new(
+        AsyncDb::new(
+            core.handle(),
+            "http://influxdb:8086", // URL to InfluxDB
+            "metrics", /* Name of the database in InfluxDB */
+        ).expect("Unable to create AsyncDb"),
+    );
 
 
     // Create the outer pipeline on the message stream.
     // let mut counter = 0;
-    let processed_stream = consumer.start()
+    let processed_stream = consumer
+        .start()
         .filter_map(|result| {
             // Filter out errors
             match result {
@@ -131,18 +131,22 @@ fn handle(brokers: &str, group_id: &str, topic: &str) -> Result<()> {
             // let producer = producer.clone();
             // let topic_name = output_topic.to_owned();
             // Create the inner pipeline, that represents the processing of a single event.
-            let process_message = cpu_pool.spawn_fn(move || {
+            let async_db = async_db.clone();
+            let process_message = cpu_pool
+                .spawn_fn(move || {
                     // Take ownership of the message, and runs an expensive computation on it,
                     // using one of the threads of the `cpu_pool`.
                     Ok(decoder::decode(msg.payload().unwrap()))
                     // println!("{:?}", msg);
                     // Ok(())
                 })
-                .and_then(|decoded| {
+                .and_then(move |decoded| {
                     // Send the result of the computation to Kafka, asynchronously.
                     // info!("Decoded! {:?}", decoded);
-                    async_db.add_data("cpu_load_short,host=server01,region=us-west value=0.64 \
-                                       1434055562000000000");
+                    async_db.add_data(
+                        "cpu_load_short,host=server01,region=us-west value=0.64 \
+                                       1434055562000000000",
+                    );
                     Ok(())
                 });
             // .and_then(|mut batch| {
@@ -173,27 +177,35 @@ fn run() -> Result<()> {
     let matches = App::new("Async example")
         .version(option_env!("CARGO_PKG_VERSION").unwrap_or(""))
         .about("Asynchronous computation example")
-        .arg(Arg::with_name("brokers")
-            .short("b")
-            .long("brokers")
-            .help("Broker list in kafka format")
-            .takes_value(true)
-            .default_value("localhost:9092"))
-        .arg(Arg::with_name("group-id")
-            .short("g")
-            .long("group-id")
-            .help("Consumer group id")
-            .takes_value(true)
-            .default_value("example_consumer_group_id"))
-        .arg(Arg::with_name("log-conf")
-            .long("log-conf")
-            .help("Configure the logging format (example: 'rdkafka=trace')")
-            .takes_value(true))
-        .arg(Arg::with_name("topic")
-            .long("topic")
-            .help("Input topic")
-            .takes_value(true)
-            .required(true))
+        .arg(
+            Arg::with_name("brokers")
+                .short("b")
+                .long("brokers")
+                .help("Broker list in kafka format")
+                .takes_value(true)
+                .default_value("localhost:9092"),
+        )
+        .arg(
+            Arg::with_name("group-id")
+                .short("g")
+                .long("group-id")
+                .help("Consumer group id")
+                .takes_value(true)
+                .default_value("example_consumer_group_id"),
+        )
+        .arg(
+            Arg::with_name("log-conf")
+                .long("log-conf")
+                .help("Configure the logging format (example: 'rdkafka=trace')")
+                .takes_value(true),
+        )
+        .arg(
+            Arg::with_name("topic")
+                .long("topic")
+                .help("Input topic")
+                .takes_value(true)
+                .required(true),
+        )
         .get_matches();
 
     setup_logger(true, matches.value_of("log-conf"));
@@ -207,7 +219,7 @@ fn run() -> Result<()> {
 
 fn main() {
     if let Err(ref e) = run() {
-        use ::std::io::Write;
+        use std::io::Write;
         let stderr = &mut ::std::io::stderr();
         let errmsg = "Error writing to stderr";
 
